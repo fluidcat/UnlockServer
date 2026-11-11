@@ -1,16 +1,21 @@
 name: build-from-bundle
 
-# 临时验证用工作流：本分支不含源码，改从一个 git bundle 拉取后编译。
-# 换成你自己的 bundle 地址时，只改 BUNDLE_URL 一行即可。
+# 临时通道：本分支不含源码，从一个 git bundle 拉取后编译；
+# commit message 里带 [push-source] 时，额外把源码推到 feature/network-control。
 on:
   workflow_dispatch:
   push:
     paths:
       - ".github/workflows/build-from-bundle.yml"
 
+# 仅用于 [push-source] 那一步把 bundle 里的源码写回仓库
+permissions:
+  contents: write
+
 env:
-  BUNDLE_URL: https://aka.doubaocdn.com/s/VWVRegKqeZ
+  BUNDLE_URL: https://aka.doubaocdn.com/s/a2sj9aARkD
   SRC_BRANCH: feature/network-control
+  TARGET_BRANCH: feature/network-control
 
 jobs:
   build:
@@ -29,23 +34,32 @@ jobs:
           git clone $path src -b $env:SRC_BRANCH
           git -C src log -1 --oneline
 
+      # 用 GITHUB_TOKEN 把 bundle 里的提交推到 TARGET_BRANCH；
+      # 这种推送不会反过来触发工作流，避免递归。
+      - name: Publish source to target branch
+        if: contains(github.event.head_commit.message, '[push-source]')
+        working-directory: src
+        run: |
+          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/$env:TARGET_BRANCH --force
+          if ($LASTEXITCODE -ne 0) { throw "push failed: $LASTEXITCODE" }
+          git ls-remote "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "refs/heads/$env:TARGET_BRANCH"
+        shell: pwsh
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
       # 老式（非 SDK）csproj 单工程还原必须给 SolutionDir，否则 NuGet.targets 报
-      # "No solution found"。packages 落到 $(SolutionDir)packages，匹配 ..\packages HintPath。
+      # "No solution found"。packages 落到 $(SolutionDir)packages。
       - name: Restore NuGet (packages.config layout)
         working-directory: src
         shell: pwsh
         run: |
           $solutionDir = (Join-Path $env:GITHUB_WORKSPACE 'src').Replace('\', '/') + '/'
-          Write-Host "SolutionDir=$solutionDir"
           msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -t:restore -p:RestorePackagesConfig=true -p:SolutionDir=$solutionDir -v:m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem packages -ErrorAction SilentlyContinue | Select-Object Name
 
-      # 平台名必须写 AnyCPU（无空格）：csproj 里的条件就是 'Release|AnyCPU'，
-      # 直接编 csproj 没有 sln 那层 "Any CPU" -> "AnyCPU" 映射。
+      # 平台名必须写 AnyCPU（无空格）：csproj 条件是 'Release|AnyCPU'。
       - name: Build WPF (net48)
         working-directory: src
         shell: pwsh
@@ -53,9 +67,7 @@ jobs:
           msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -p:Configuration=Release -p:Platform=AnyCPU -v:m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # vcxproj 的后置事件用 $(SolutionDir) 定位 WPF 输出目录；
-      # 直接编 vcxproj 时 SolutionDir 为空，拷贝会被 "if exist" 静默跳过，
-      # 所以这里必须显式传入。
+      # vcxproj 后置事件靠 $(SolutionDir) 定位 WPF 输出目录，直接编时必须显式传入。
       - name: Build Provider (x64)
         working-directory: src
         shell: pwsh
@@ -64,7 +76,6 @@ jobs:
           msbuild UnlockServer.Provider\UnlockServer.Provider.vcxproj -p:Configuration=Release -p:Platform=x64 -p:SolutionDir=$solutionDir -v:m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # 即便后置事件失效也能落位：显式拷贝 + 强断言（缺 DLL 的安装包是废的）
       - name: Ensure Provider dll in WPF output
         working-directory: src
         shell: pwsh
