@@ -1,0 +1,79 @@
+name: build-from-bundle
+
+# 临时验证用工作流：本分支不含源码，改从一个 git bundle 拉取后编译。
+# 换成你自己的 bundle 地址时，只改 BUNDLE_URL 一行即可。
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-from-bundle.yml"
+
+env:
+  BUNDLE_URL: https://aka.doubaocdn.com/s/VWVRegKqeZ
+  SRC_BRANCH: feature/network-control
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch source bundle
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP "src.bundle"
+          Invoke-WebRequest -Uri $env:BUNDLE_URL -OutFile $path -UseBasicParsing
+          git bundle verify $path
+          git clone $path src -b $env:SRC_BRANCH
+          git -C src log -1 --oneline
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet (packages.config layout)
+        working-directory: src
+        run: >
+          msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -t:restore
+          -p:RestorePackagesConfig=true -v:m
+
+      - name: Build WPF (net48)
+        working-directory: src
+        run: >
+          msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -p:Configuration=Release
+          -p:Platform="Any CPU" -v:m
+
+      - name: Build Provider (x64)
+        working-directory: src
+        run: >
+          msbuild UnlockServer.Provider\UnlockServer.Provider.vcxproj
+          -p:Configuration=Release -p:Platform=x64 -v:m
+
+      - name: Check Provider dll landed in WPF output
+        working-directory: src
+        shell: pwsh
+        run: |
+          $dll = "UnlockServer.Wpf\bin\Release\UnlockServer.Provider.dll"
+          if (!(Test-Path $dll)) { throw "Provider dll missing: $dll (WPF must build before Provider)" }
+          Get-ChildItem "UnlockServer.Wpf\bin\Release" | Select-Object Name, Length
+
+      - name: Regression tests (23 scenarios)
+        working-directory: src/tests/UnlockServer.RegressionTests
+        run: dotnet run -c Release
+
+      - name: Package artifact
+        working-directory: src
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "UnlockServer.Wpf\bin\Release\*" out -Recurse
+          Remove-Item "out\Logs" -Recurse -Force -ErrorAction SilentlyContinue
+          Compress-Archive out\* UnlockServer-Wpf-Release.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnlockServer-Wpf-Release
+          path: src/UnlockServer-Wpf-Release.zip
+          if-no-files-found: error
+          retention-days: 30
