@@ -8,7 +8,6 @@ on:
     paths:
       - ".github/workflows/build-from-bundle.yml"
 
-# 仅用于 [push-source] 那一步把 bundle 里的源码写回仓库
 permissions:
   contents: write
 
@@ -34,22 +33,25 @@ jobs:
           git clone $path src -b $env:SRC_BRANCH
           git -C src log -1 --oneline
 
-      # 用 GITHUB_TOKEN 把 bundle 里的提交推到 TARGET_BRANCH；
-      # 这种推送不会反过来触发工作流，避免递归。
+      # GITHUB_TOKEN 是 GitHub App 身份，没有 workflows 权限，
+      # 不能推送包含 .github/workflows/** 改动的提交（remote rejected）。
+      # 因此先把 workflow 目录从索引移除再推，build.yml 另行添加。
       - name: Publish source to target branch
         if: contains(github.event.head_commit.message, '[push-source]')
         working-directory: src
+        shell: pwsh
         run: |
+          if (Test-Path .github/workflows) {
+            git rm -r --cached .github/workflows | Out-Null
+            git -c user.name="UnlockServer CI" -c user.email="ci@users.noreply.github.com" commit --amend --no-edit
+          }
+          git log -1 --oneline
           git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/$env:TARGET_BRANCH --force
           if ($LASTEXITCODE -ne 0) { throw "push failed: $LASTEXITCODE" }
-          git ls-remote "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "refs/heads/$env:TARGET_BRANCH"
-        shell: pwsh
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # 老式（非 SDK）csproj 单工程还原必须给 SolutionDir，否则 NuGet.targets 报
-      # "No solution found"。packages 落到 $(SolutionDir)packages。
       - name: Restore NuGet (packages.config layout)
         working-directory: src
         shell: pwsh
@@ -59,7 +61,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem packages -ErrorAction SilentlyContinue | Select-Object Name
 
-      # 平台名必须写 AnyCPU（无空格）：csproj 条件是 'Release|AnyCPU'。
       - name: Build WPF (net48)
         working-directory: src
         shell: pwsh
@@ -67,7 +68,6 @@ jobs:
           msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -p:Configuration=Release -p:Platform=AnyCPU -v:m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # vcxproj 后置事件靠 $(SolutionDir) 定位 WPF 输出目录，直接编时必须显式传入。
       - name: Build Provider (x64)
         working-directory: src
         shell: pwsh
