@@ -28,7 +28,7 @@ jobs:
       # 老式（非 SDK）csproj 单工程还原必须给 SolutionDir，否则 NuGet.targets 报
       # "No solution found. Restore against a solution or pass in /p:SolutionDir"。
       - name: Restore NuGet (packages.config layout)
-        shell: pwwsh
+        shell: pwsh
         run: |
           $solutionDir = $env:GITHUB_WORKSPACE.Replace('\', '/') + '/'
           Write-Host "SolutionDir=$solutionDir"
