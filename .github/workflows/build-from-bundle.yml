@@ -45,17 +45,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem packages -ErrorAction SilentlyContinue | Select-Object Name
 
+      # 平台名必须写 AnyCPU（无空格）：csproj 里的条件就是 'Release|AnyCPU'。
+      # 解决方案里的 "Any CPU" 是 sln 那一层做的映射，直接编 csproj 没有这层映射，
+      # 写成 "Any CPU" 会导致条件不命中，进而报 OutputPath 未设置。
       - name: Build WPF (net48)
         working-directory: src
-        run: >
-          msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -p:Configuration=Release
-          -p:Platform="Any CPU" -v:m
+        shell: pwsh
+        run: |
+          msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -p:Configuration=Release -p:Platform=AnyCPU -v:m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Provider (x64)
         working-directory: src
-        run: >
-          msbuild UnlockServer.Provider\UnlockServer.Provider.vcxproj
-          -p:Configuration=Release -p:Platform=x64 -v:m
+        shell: pwsh
+        run: |
+          msbuild UnlockServer.Provider\UnlockServer.Provider.vcxproj -p:Configuration=Release -p:Platform=x64 -v:m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check Provider dll landed in WPF output
         working-directory: src
