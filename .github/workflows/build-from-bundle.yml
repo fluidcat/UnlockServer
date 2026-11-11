@@ -32,9 +32,8 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # 老式（非 SDK）csproj 单工程还原必须给 SolutionDir，
-      # 否则 NuGet.targets 报 "No solution found"，也定位不到 packages 目录。
-      # packages 落到 $(SolutionDir)packages，正好匹配 csproj 里的 ..\packages HintPath。
+      # 老式（非 SDK）csproj 单工程还原必须给 SolutionDir，否则 NuGet.targets 报
+      # "No solution found"。packages 落到 $(SolutionDir)packages，匹配 ..\packages HintPath。
       - name: Restore NuGet (packages.config layout)
         working-directory: src
         shell: pwsh
@@ -45,9 +44,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem packages -ErrorAction SilentlyContinue | Select-Object Name
 
-      # 平台名必须写 AnyCPU（无空格）：csproj 里的条件就是 'Release|AnyCPU'。
-      # 解决方案里的 "Any CPU" 是 sln 那一层做的映射，直接编 csproj 没有这层映射，
-      # 写成 "Any CPU" 会导致条件不命中，进而报 OutputPath 未设置。
+      # 平台名必须写 AnyCPU（无空格）：csproj 里的条件就是 'Release|AnyCPU'，
+      # 直接编 csproj 没有 sln 那层 "Any CPU" -> "AnyCPU" 映射。
       - name: Build WPF (net48)
         working-directory: src
         shell: pwsh
@@ -55,19 +53,26 @@ jobs:
           msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -p:Configuration=Release -p:Platform=AnyCPU -v:m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # vcxproj 的后置事件用 $(SolutionDir) 定位 WPF 输出目录；
+      # 直接编 vcxproj 时 SolutionDir 为空，拷贝会被 "if exist" 静默跳过，
+      # 所以这里必须显式传入。
       - name: Build Provider (x64)
         working-directory: src
         shell: pwsh
         run: |
-          msbuild UnlockServer.Provider\UnlockServer.Provider.vcxproj -p:Configuration=Release -p:Platform=x64 -v:m
+          $solutionDir = (Join-Path $env:GITHUB_WORKSPACE 'src').Replace('\', '/') + '/'
+          msbuild UnlockServer.Provider\UnlockServer.Provider.vcxproj -p:Configuration=Release -p:Platform=x64 -p:SolutionDir=$solutionDir -v:m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Check Provider dll landed in WPF output
+      # 即便后置事件失效也能落位：显式拷贝 + 强断言（缺 DLL 的安装包是废的）
+      - name: Ensure Provider dll in WPF output
         working-directory: src
         shell: pwsh
         run: |
-          $dll = "UnlockServer.Wpf\bin\Release\UnlockServer.Provider.dll"
-          if (!(Test-Path $dll)) { throw "Provider dll missing: $dll (WPF must build before Provider)" }
+          $source = "UnlockServer.Provider\bin\Release\UnlockServer.Provider.dll"
+          $target = "UnlockServer.Wpf\bin\Release\UnlockServer.Provider.dll"
+          if (!(Test-Path $source)) { throw "Provider build output missing: $source" }
+          if (!(Test-Path $target)) { Copy-Item $source $target -Force }
           Get-ChildItem "UnlockServer.Wpf\bin\Release" | Select-Object Name, Length
 
       - name: Regression tests (23 scenarios)
