@@ -56,6 +56,12 @@ namespace UnlockServer.Services
                 settings.RequireAllDevices = OperateIniFile.ReadIniInt("setting", "requireall", 0) == 1;
                 settings.UseLocalUnlock = OperateIniFile.ReadIniInt("setting", "localunlock", 1) == 1;
 
+                settings.NetworkEnabled = OperateIniFile.ReadIniInt("setting", "netenabled", 0) == 1;
+                settings.NetworkListen = OperateIniFile.ReadIniString("setting", "netlisten", "0.0.0.0");
+                settings.NetworkPort = OperateIniFile.ReadIniInt("setting", "netport", 2085);
+                settings.NetworkLock = OperateIniFile.ReadIniInt("setting", "netlock", 1) == 1;
+                settings.NetworkUnlock = OperateIniFile.ReadIniInt("setting", "netunlock", 0) == 1;
+
                 settings.Devices = LoadDevices();
                 if (settings.Devices.Count == 0 && !string.IsNullOrWhiteSpace(settings.DeviceAddress))
                 {
@@ -108,6 +114,12 @@ namespace UnlockServer.Services
                 OperateIniFile.WriteIniInt("setting", "presencetimeout", settings.PresenceTimeout);
                 OperateIniFile.WriteIniInt("setting", "requireall", settings.RequireAllDevices ? 1 : 0);
                 OperateIniFile.WriteIniInt("setting", "localunlock", settings.UseLocalUnlock ? 1 : 0);
+
+                OperateIniFile.WriteIniInt("setting", "netenabled", settings.NetworkEnabled ? 1 : 0);
+                OperateIniFile.WriteIniString("setting", "netlisten", settings.NetworkListen);
+                OperateIniFile.WriteIniInt("setting", "netport", settings.NetworkPort);
+                OperateIniFile.WriteIniInt("setting", "netlock", settings.NetworkLock ? 1 : 0);
+                OperateIniFile.WriteIniInt("setting", "netunlock", settings.NetworkUnlock ? 1 : 0);
                 SaveDevices(settings.Devices);
 
                 if (settings.Devices != null && settings.Devices.Count > 0)

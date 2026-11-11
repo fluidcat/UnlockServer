@@ -138,7 +138,7 @@
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}" CornerRadius="10" Padding="4" Margin="0,0,0,10">
-                    <UniformGrid Columns="3">
+                    <UniformGrid Columns="4">
                         <Button Content="设备" Command="{Binding SelectTabCommand}" CommandParameter="0">
                             <Button.Style>
                                 <Style TargetType="Button" BasedOn="{StaticResource TabChipStyle}">
@@ -168,6 +168,18 @@
                                 <Style TargetType="Button" BasedOn="{StaticResource TabChipStyle}">
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding IsTabRules}" Value="True">
+                                            <Setter Property="Background" Value="{StaticResource PrimaryBrush}"/>
+                                            <Setter Property="Foreground" Value="White"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                        <Button Content="网络" Command="{Binding SelectTabCommand}" CommandParameter="3">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource TabChipStyle}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsTabNetwork}" Value="True">
                                             <Setter Property="Background" Value="{StaticResource PrimaryBrush}"/>
                                             <Setter Property="Foreground" Value="White"/>
                                         </DataTrigger>
@@ -452,6 +464,101 @@
                                 </Grid>
                             </Border>
                         </UniformGrid>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="12"
+                        Visibility="{Binding IsTabNetwork, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Text="局域网控制" FontSize="13" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}"/>
+                        <TextBlock Grid.Row="1" Text="本机作为服务端，请求需用客户端密钥签名。网络是独立触发源，不需要蓝牙在场。"
+                                   FontSize="11" Foreground="{StaticResource TextDisabledBrush}" TextWrapping="Wrap" Margin="0,4,0,10"/>
+
+                        <CheckBox Grid.Row="2" Content="启用网络控制" Style="{StaticResource ToggleSwitchStyle}"
+                                  IsChecked="{Binding Settings.NetworkEnabled}" FontSize="12" Margin="0,0,0,10"/>
+
+                        <Grid Grid.Row="3" Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition Width="110"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="监听地址" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,3"/>
+                                <TextBox Text="{Binding Settings.NetworkListen, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource ModernTextBoxStyle}"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="端口" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,3"/>
+                                <TextBox Text="{Binding Settings.NetworkPort, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource ModernTextBoxStyle}"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <UniformGrid Grid.Row="4" Columns="2" Margin="0,0,0,6">
+                            <CheckBox Content="允许网络锁屏" Style="{StaticResource ToggleSwitchStyle}" IsChecked="{Binding Settings.NetworkLock}" FontSize="12" Margin="0,0,12,0"/>
+                            <CheckBox Content="允许网络解锁" Style="{StaticResource ToggleSwitchStyle}" IsChecked="{Binding Settings.NetworkUnlock}" FontSize="12" Margin="0"/>
+                        </UniformGrid>
+
+                        <TextBlock Grid.Row="5" Text="{Binding NetworkStatusText}" FontSize="11"
+                                   Foreground="{StaticResource TextDisabledBrush}" TextWrapping="Wrap" MinHeight="18"/>
+
+                        <TextBlock Grid.Row="6" Text="客户端密钥" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,12,0,6"/>
+
+                        <ScrollViewer Grid.Row="7" MaxHeight="96" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding NetworkClients}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}" FontSize="12" Foreground="{StaticResource TextPrimaryBrush}"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding Id}" FontSize="10" Foreground="{StaticResource TextDisabledBrush}"/>
+                                                    <TextBlock Text="{Binding Fingerprint}" FontSize="10" Foreground="{StaticResource TextDisabledBrush}" Margin="6,0,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                            <Button Grid.Column="2" Content="撤销" Style="{StaticResource GhostButtonStyle}"
+                                                    Command="{Binding DataContext.RemoveNetworkClientCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                    CommandParameter="{Binding}" Padding="8,4"/>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+
+                        <Grid Grid.Row="8" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Text="{Binding NewClientName, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource ModernTextBoxStyle}"/>
+                            <Button Grid.Column="2" Content="生成密钥" Style="{StaticResource SecondaryButtonStyle}"
+                                    Command="{Binding GenerateClientKeyCommand}" Padding="12,7"/>
+                        </Grid>
+
+                        <StackPanel Grid.Row="9" Margin="0,8,0,0"
+                                    Visibility="{Binding HasGeneratedSecret, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <TextBlock Text="客户端密钥（只显示这一次）" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,3"/>
+                            <TextBox Text="{Binding LastGeneratedSecret}" IsReadOnly="True" Style="{StaticResource ModernTextBoxStyle}"
+                                     FontFamily="Consolas" FontSize="11"/>
+                        </StackPanel>
                     </Grid>
                 </Border>
             </Grid>

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using InTheHand.Net.Bluetooth;
 using UnlockServer.Models;
+using UnlockServer.Network;
 using UnlockServer.Services;
 using UnlockServer.Views;
 
@@ -39,6 +40,9 @@ namespace UnlockServer
         private readonly Dictionary<string, bool> _inRangeByAddress = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource _monitorCancellation;
         private bool _ownsScan;
+        private bool _bluetoothAvailable = true;
+        // 网络命令由监控循环消费；HTTP 线程只入队，避免在锁内阻塞请求线程。
+        private volatile NetworkCommandQueue _networkQueue;
 
         private int locktimecount;
         private bool isunlockfail;
@@ -161,14 +165,26 @@ namespace UnlockServer
                 };
 
                 var radio = BluetoothRadio.Default;
-                if (radio == null)
+                _bluetoothAvailable = radio != null;
+                if (_bluetoothAvailable)
                 {
-                    sessionSwitchClass.Close();
-                    throw new InvalidOperationException("没有找到本机蓝牙设备！");
+                    try
+                    {
+                        _bluetooth.AddScanUser();
+                        _ownsScan = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        // 没有蓝牙硬件时网络控制仍需可用，不能因为扫描失败整体退出。
+                        _bluetoothAvailable = false;
+                        _ownsScan = false;
+                        LogHelper.WriteLine($"启动蓝牙扫描失败，仅运行网络控制: {ex.Message}");
+                    }
                 }
-
-                _bluetooth.AddScanUser();
-                _ownsScan = true;
+                else
+                {
+                    LogHelper.WriteLine("未检测到蓝牙适配器，仅运行网络控制");
+                }
                 var cancellation = new CancellationTokenSource();
                 _monitorCancellation = cancellation;
                 var token = cancellation.Token;
@@ -269,6 +285,10 @@ namespace UnlockServer
         {
             lock (lockLock)
             {
+                // 网络命令是独立触发源，不依赖绑定设备与蓝牙在场，
+                // 因此必须在无设备早退之前消费。
+                ProcessNetworkCommands();
+
                 var enabled = _bound.Where(d => d.Enabled).ToList();
                 if (enabled.Count == 0)
                 {
@@ -280,7 +300,12 @@ namespace UnlockServer
                 bool islocked = (sessionSwitchClass != null && sessionSwitchClass.IsLocked)
                     || WanClient.IsSessionLocked();
                 if (!islocked) isunlockfail = false;
-                if (_bluetooth == null) return;
+                if (!_bluetoothAvailable || _bluetooth == null)
+                {
+                    // 没有蓝牙硬件时不能把"始终不在附近"当成离开，否则会立刻自动锁屏。
+                    UpdategRssi?.Invoke("蓝牙不可用 · 仅网络控制", false);
+                    return;
+                }
 
                 var snapshot = _bluetooth.GetDevices();
                 bool scanHealthy = !_bluetooth.LooksLikeScanStall();
@@ -564,6 +589,123 @@ namespace UnlockServer
                 return rssi >= rssiyuzhi;
             if (previous) return rssi >= rssiyuzhi - half;
             return rssi >= rssiyuzhi + half;
+        }
+
+        /// <summary>
+        /// 挂接网络命令队列。由主程序在初始化时调用。
+        /// </summary>
+        public void SetNetworkQueue(NetworkCommandQueue queue)
+        {
+            lock (lockLock) { _networkQueue = queue; }
+        }
+
+        private void ProcessNetworkCommands()
+        {
+            var queue = _networkQueue;
+            if (queue == null) return;
+
+            NetworkRequest request;
+            if (!queue.TryDequeue(out request)) return;
+
+            var islocked = (sessionSwitchClass != null && sessionSwitchClass.IsLocked) || WanClient.IsSessionLocked();
+            LogHelper.WriteLine($"执行网络命令: {request.Kind}（来自 {request.ClientId}）");
+
+            if (request.Kind == NetworkCommandKind.Lock)
+                ExecuteNetworkLock(request, islocked);
+            else
+                ExecuteNetworkUnlock(request, islocked);
+        }
+
+        private void ExecuteNetworkLock(NetworkRequest request, bool islocked)
+        {
+            if (islocked)
+            {
+                _networkQueue.Complete(request.Id, NetworkRequestState.Done, "already_in_state");
+                return;
+            }
+            if (_unlockTestRunning)
+            {
+                _networkQueue.Complete(request.Id, NetworkRequestState.Rejected, "busy");
+                return;
+            }
+
+            try
+            {
+                if (sessionSwitchClass != null)
+                {
+                    sessionSwitchClass.dolocking = true;
+                    sessionSwitchClass.isLockBySoft = true;
+                }
+                DoLock();
+                // LockWorkStation 本身不返回结果，只能观测会话状态；
+                // 观测不到时仍记录为已下发，并标注 unverified。
+                var verified = WaitForSessionState(true, 4, 200);
+                _networkQueue.Complete(request.Id, NetworkRequestState.Done, verified ? null : "unverified");
+                LogHelper.WriteLine($"网络锁屏已执行，状态确认: {verified}");
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLine($"网络锁屏失败: {ex.Message}");
+                _networkQueue.Complete(request.Id, NetworkRequestState.Rejected, "error");
+            }
+        }
+
+        private void ExecuteNetworkUnlock(NetworkRequest request, bool islocked)
+        {
+            if (!islocked)
+            {
+                _networkQueue.Complete(request.Id, NetworkRequestState.Done, "already_in_state");
+                return;
+            }
+            if (_unlockTestRunning)
+            {
+                _networkQueue.Complete(request.Id, NetworkRequestState.Rejected, "busy");
+                return;
+            }
+            if (!useLocalUnlock || !LocalUnlock.CanUnlock())
+            {
+                LogHelper.WriteLine("网络解锁被拒绝：本机解锁组件未就绪");
+                _networkQueue.Complete(request.Id, NetworkRequestState.Rejected, "provider_not_ready");
+                return;
+            }
+
+            // 与锁屏点击一致：只解物理控制台会话，远程会话不处理。
+            var console = WanClient.WTSGetActiveConsoleSessionId();
+            if (console == uint.MaxValue)
+            {
+                _networkQueue.Complete(request.Id, NetworkRequestState.Rejected, "not_console");
+                return;
+            }
+
+            try
+            {
+                if (sessionSwitchClass != null)
+                {
+                    sessionSwitchClass.dounlocking = true;
+                    sessionSwitchClass.isLockBySoft = false;
+                }
+                var ok = DoUnlock(console);
+                LogHelper.WriteLine($"网络解锁结果: {ok}");
+                _networkQueue.Complete(request.Id,
+                    ok ? NetworkRequestState.Done : NetworkRequestState.Rejected,
+                    ok ? null : "authentication_failed_or_timeout");
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLine($"网络解锁失败: {ex.Message}");
+                _networkQueue.Complete(request.Id, NetworkRequestState.Rejected, "error");
+            }
+        }
+
+        private bool WaitForSessionState(bool expectedLocked, int attempts, int intervalMs)
+        {
+            for (var i = 0; i < attempts; i++)
+            {
+                var current = (sessionSwitchClass != null && sessionSwitchClass.IsLocked) || WanClient.IsSessionLocked();
+                if (current == expectedLocked) return true;
+                Thread.Sleep(intervalMs);
+            }
+            return ((sessionSwitchClass != null && sessionSwitchClass.IsLocked) || WanClient.IsSessionLocked()) == expectedLocked;
         }
 
         private void HandleClickUnlock(uint targetSession, bool deviceHere)

@@ -109,6 +109,10 @@
     <Compile Include="Services\IBluetoothService.cs" />
     <Compile Include="Services\BluetoothService.cs" />
     <Compile Include="Services\ConfigService.cs" />
+    <Compile Include="Services\Network\ApiAuth.cs" />
+    <Compile Include="Services\Network\ClientKeyStore.cs" />
+    <Compile Include="Services\Network\ControlApiServer.cs" />
+    <Compile Include="Services\Network\NetworkCommandQueue.cs" />
     <Compile Include="ViewModels\ViewModelBase.cs" />
     <Compile Include="ViewModels\RelayCommand.cs" />
     <Compile Include="ViewModels\MainViewModel.cs" />
@@ -132,6 +136,7 @@
     <Compile Include="Utils\LocalUnlock.cs" />
     <Compile Include="Utils\SessionUnlockChannel.cs" />
     <Compile Include="Utils\LogHelper.cs" />
+    <Compile Include="Utils\NetworkAccessHelper.cs" />
     <Compile Include="Utils\OperateIniFile.cs" />
     <Compile Include="Utils\SessionSwitchClass.cs" />
     <Compile Include="Utils\SslTcpClient.cs" />

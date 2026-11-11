@@ -67,6 +67,8 @@ namespace UnlockServer
         public static void LockPc() { Locks++; LockThread = Environment.CurrentManagedThreadId; }
         public static bool UnlockPc() { Unlocks++; return true; }
         public static bool isConfigVal() => true;
+        public static uint WTSGetActiveConsoleSessionId() => ConsoleSession;
+        public static uint ConsoleSession = 7;
     }
     public static class LocalUnlock
     {

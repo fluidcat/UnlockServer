@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
 using UnlockServer.Models;
+using UnlockServer.Network;
 using UnlockServer.Services;
 using UnlockServer.Views;
 
@@ -28,6 +29,19 @@ namespace UnlockServer.ViewModels
         private readonly DispatcherTimer _autoSaveTimer;
         private volatile int _monitorVersion;
         private bool _suspendAutoSave;
+
+        // 网络控制：接口只入队，由 UnlockManager 的监控循环执行。
+        private readonly NetworkCommandQueue _networkQueue = new NetworkCommandQueue();
+        private readonly ClientKeyStore _clientKeys = new ClientKeyStore();
+        private ApiAuth _apiAuth;
+        private ControlApiServer _apiServer;
+        private string _networkSignature;
+        private string _networkStatus = "网络控制未启用";
+        private string _newClientName = "";
+        private string _lastGeneratedSecret = "";
+
+        public ObservableCollection<NetworkClientInfo> NetworkClients { get; } =
+            new ObservableCollection<NetworkClientInfo>();
 
         public ObservableCollection<BoundDevice> BoundDevices { get; } = new ObservableCollection<BoundDevice>();
 
@@ -87,6 +101,7 @@ namespace UnlockServer.ViewModels
                     OnPropertyChanged(nameof(IsTabDevices));
                     OnPropertyChanged(nameof(IsTabUnlock));
                     OnPropertyChanged(nameof(IsTabRules));
+                    OnPropertyChanged(nameof(IsTabNetwork));
                 }
             }
         }
@@ -94,6 +109,32 @@ namespace UnlockServer.ViewModels
         public bool IsTabDevices => SelectedTab == 0;
         public bool IsTabUnlock => SelectedTab == 1;
         public bool IsTabRules => SelectedTab == 2;
+        public bool IsTabNetwork => SelectedTab == 3;
+
+        public string NetworkStatusText
+        {
+            get => _networkStatus;
+            set => SetProperty(ref _networkStatus, value);
+        }
+
+        public string NewClientName
+        {
+            get => _newClientName;
+            set => SetProperty(ref _newClientName, value);
+        }
+
+        /// <summary>
+        /// 新生成的客户端密钥，只在生成后显示；切换页面或重启后不再保留。
+        /// </summary>
+        public string LastGeneratedSecret
+        {
+            get => _lastGeneratedSecret;
+            set => SetProperty(ref _lastGeneratedSecret, value);
+        }
+
+        public bool HasGeneratedSecret => !string.IsNullOrEmpty(_lastGeneratedSecret);
+
+        public bool HasNetworkClients => NetworkClients.Count > 0;
 
         public bool HasNoDevices => BoundDevices.Count == 0;
 
@@ -141,6 +182,8 @@ namespace UnlockServer.ViewModels
         public ICommand InstallLocalUnlockCommand { get; }
         public ICommand UninstallLocalUnlockCommand { get; }
         public ICommand TestUnlockCommand { get; }
+        public ICommand GenerateClientKeyCommand { get; }
+        public ICommand RemoveNetworkClientCommand { get; }
 
         public MainViewModel()
         {
@@ -182,6 +225,11 @@ namespace UnlockServer.ViewModels
             UninstallLocalUnlockCommand = new RelayCommand(UninstallLocalUnlock);
             TestUnlockCommand = new RelayCommand(TestUnlock, _ => CanTestUnlock);
 
+            _apiAuth = new ApiAuth(_clientKeys);
+            GenerateClientKeyCommand = new RelayCommand(GenerateClientKey);
+            RemoveNetworkClientCommand = new RelayCommand(RemoveNetworkClient);
+            RefreshNetworkClients();
+
             RefreshLocalUnlockStatus();
             InitializeUnlockManager();
         }
@@ -215,6 +263,7 @@ namespace UnlockServer.ViewModels
                 }
 
                 ApplySettingsToManager();
+                ApplyNetworkSettings();
                 RefreshLocalUnlockStatus();
                 RefreshSetupHint();
             }
@@ -477,10 +526,10 @@ namespace UnlockServer.ViewModels
                 return;
             }
 
-            if (BoundDevices.Count == 0)
+            if (BoundDevices.Count == 0 && !Settings.NetworkEnabled)
             {
                 SelectedTab = 0;
-                MessageDialog.ShowWarning("请先添加一台蓝牙设备，再开始监控。");
+                MessageDialog.ShowWarning("请先添加一台蓝牙设备，或在「网络」页启用网络控制，再开始监控。");
                 return;
             }
 
@@ -500,7 +549,7 @@ namespace UnlockServer.ViewModels
 
         public void Initialize()
         {
-            if (BoundDevices.Count > 0)
+            if (BoundDevices.Count > 0 || Settings.NetworkEnabled)
                 StartMonitoring();
             else
             {
@@ -508,10 +557,15 @@ namespace UnlockServer.ViewModels
                 CurrentRssi = "请先添加设备";
                 IsDeviceInRange = false;
             }
+            ApplyNetworkSettings();
             RefreshSetupHint();
         }
 
-        public void Cleanup() => StopMonitoring();
+        public void Cleanup()
+        {
+            StopMonitoring();
+            StopNetworkServer();
+        }
 
         private void InitializeUnlockManager()
         {
@@ -536,6 +590,7 @@ namespace UnlockServer.ViewModels
                     useLocalUnlock = Settings.UseLocalUnlock
                 };
                 _unlockManager.SetBoundDevices(BoundDevices);
+                _unlockManager.SetNetworkQueue(_networkQueue);
                 _unlockManager.UpdategRssi = UpdateRssiDisplay;
                 _unlockManager.UpdateDevicePresence = UpdateDevicePresence;
                 _unlockManager.UnlockTestFinished = OnUnlockTestFinished;
@@ -562,7 +617,7 @@ namespace UnlockServer.ViewModels
             catch (Exception ex)
             {
                 LogHelper.WriteLine($"启动监控失败: {ex.Message}");
-                MessageDialog.ShowError("启动蓝牙监控失败，可能没有蓝牙硬件或者不兼容！");
+                MessageDialog.ShowError("启动监控失败，请检查蓝牙硬件与网络控制配置。");
             }
         }
 
@@ -644,6 +699,135 @@ namespace UnlockServer.ViewModels
                 Settings.LockWhenSeen);
             SyncBoundDevicesToManager(false);
         }
+
+        #region 网络控制
+
+        private void ApplyNetworkSettings()
+        {
+            if (!Settings.NetworkEnabled)
+            {
+                StopNetworkServer();
+                NetworkStatusText = "网络控制未启用";
+                return;
+            }
+
+            var signature = Settings.NetworkListen + ":" + Settings.NetworkPort;
+            if (_clientKeys.Count == 0)
+            {
+                // 没有任何可信客户端时不开监听，避免服务端裸奔在局域网上。
+                StopNetworkServer();
+                NetworkStatusText = "还没有客户端密钥，先添加一个客户端";
+                return;
+            }
+
+            if (_apiServer != null && _apiServer.IsRunning && signature == _networkSignature)
+            {
+                NetworkStatusText = "监听中 · " + _apiServer.Endpoint;
+                return;
+            }
+
+            StopNetworkServer();
+            StartNetworkServer(signature);
+        }
+
+        private void StartNetworkServer(string signature)
+        {
+            if (_clientKeys.Count == 0)
+            {
+                NetworkStatusText = "还没有客户端密钥，先添加一个客户端";
+                LogHelper.WriteLine("网络控制未启动：没有客户端密钥");
+                return;
+            }
+
+            try
+            {
+                if (_apiServer == null)
+                {
+                    _apiServer = new ControlApiServer(_apiAuth, _networkQueue, BuildNetworkState,
+                        () => Settings.NetworkLock, () => Settings.NetworkUnlock);
+                }
+
+                if (!_apiServer.Start(Settings.NetworkListen, Settings.NetworkPort, out var error))
+                {
+                    NetworkStatusText = "启动失败：" + error;
+                    MessageDialog.ShowError("网络控制启动失败：" + error);
+                    return;
+                }
+
+                _networkSignature = signature;
+                NetworkAccessHelper.EnsurePortRule(Settings.NetworkPort);
+                NetworkStatusText = "监听中 · " + _apiServer.Endpoint;
+                if (!IsMonitoring) StartMonitoring();
+            }
+            catch (Exception ex)
+            {
+                NetworkStatusText = "启动失败：" + ex.Message;
+                LogHelper.WriteLine($"启动网络控制失败: {ex.Message}");
+            }
+        }
+
+        private void StopNetworkServer()
+        {
+            if (_apiServer == null) return;
+            _apiServer.Stop();
+            _apiServer = null;
+            _networkSignature = null;
+            NetworkAccessHelper.RemovePortRule();
+            NetworkStatusText = "网络控制未启用";
+        }
+
+        private ControlApiState BuildNetworkState()
+        {
+            // 不取 UnlockManager 的锁：解锁最长阻塞约 20 秒，状态查询不能被拖住。
+            var console = WanClient.WTSGetActiveConsoleSessionId();
+            return new ControlApiState
+            {
+                Locked = WanClient.IsSessionLocked(),
+                Pending = _networkQueue.PendingCount,
+                ConsoleSession = console == uint.MaxValue ? "" : console.ToString()
+            };
+        }
+
+        private void GenerateClientKey(object parameter)
+        {
+            try
+            {
+                var created = _clientKeys.Add(NewClientName);
+                LastGeneratedSecret = created.SecretBase64;
+                NewClientName = "";
+                OnPropertyChanged(nameof(HasGeneratedSecret));
+                RefreshNetworkClients();
+                ApplyNetworkSettings();
+                ToastService.Show("已生成客户端密钥：请立即复制，关闭后不再显示。");
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLine($"生成客户端密钥失败: {ex.Message}");
+                MessageDialog.ShowError("生成客户端密钥失败：" + ex.Message);
+            }
+        }
+
+        private void RemoveNetworkClient(object parameter)
+        {
+            var client = parameter as NetworkClientInfo;
+            if (client == null) return;
+            if (!_clientKeys.Remove(client.Id)) return;
+            RefreshNetworkClients();
+            LastGeneratedSecret = "";
+            OnPropertyChanged(nameof(HasGeneratedSecret));
+            ApplyNetworkSettings();
+            ToastService.Show("已撤销客户端密钥");
+        }
+
+        private void RefreshNetworkClients()
+        {
+            NetworkClients.Clear();
+            foreach (var client in _clientKeys.List())
+                NetworkClients.Add(client);
+            OnPropertyChanged(nameof(HasNetworkClients));
+        }
+
+        #endregion
 
         private void RefreshLocalUnlockStatus()
         {

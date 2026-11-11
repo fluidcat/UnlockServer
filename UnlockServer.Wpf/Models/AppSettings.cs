@@ -30,6 +30,11 @@ namespace UnlockServer.Models
         private int _presenceTimeout = 8;
         private bool _requireAllDevices;
         private bool _useLocalUnlock = true;
+        private bool _networkEnabled;
+        private string _networkListen = "0.0.0.0";
+        private int _networkPort = 2085;
+        private bool _networkLock = true;
+        private bool _networkUnlock;
         private List<BoundDevice> _devices = new List<BoundDevice>();
 
         /// <summary>
@@ -220,6 +225,51 @@ namespace UnlockServer.Models
         {
             get => _useLocalUnlock;
             set => SetProperty(ref _useLocalUnlock, value);
+        }
+
+        /// <summary>
+        /// 启用局域网控制接口。默认关闭，开启后本机作为服务端监听。
+        /// </summary>
+        public bool NetworkEnabled
+        {
+            get => _networkEnabled;
+            set => SetProperty(ref _networkEnabled, value);
+        }
+
+        /// <summary>
+        /// 监听地址。0.0.0.0 表示所有网卡，也可填具体网卡地址。
+        /// </summary>
+        public string NetworkListen
+        {
+            get => _networkListen;
+            set => SetProperty(ref _networkListen, string.IsNullOrWhiteSpace(value) ? "0.0.0.0" : value.Trim());
+        }
+
+        /// <summary>
+        /// 监听端口。默认 2085，避开旧远程服务用的 2084。
+        /// </summary>
+        public int NetworkPort
+        {
+            get => _networkPort;
+            set => SetProperty(ref _networkPort, value > 0 && value <= 65535 ? value : 2085);
+        }
+
+        /// <summary>
+        /// 允许通过网络请求锁屏。默认允许。
+        /// </summary>
+        public bool NetworkLock
+        {
+            get => _networkLock;
+            set => SetProperty(ref _networkLock, value);
+        }
+
+        /// <summary>
+        /// 允许通过网络请求解锁。默认关闭：网络是独立的触发源，不要求蓝牙在场。
+        /// </summary>
+        public bool NetworkUnlock
+        {
+            get => _networkUnlock;
+            set => SetProperty(ref _networkUnlock, value);
         }
 
         public List<BoundDevice> Devices

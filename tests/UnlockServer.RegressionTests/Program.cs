@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnlockServer;
 using UnlockServer.Models;
+using UnlockServer.Network;
 using UnlockServer.Services;
 using UnlockServer.ViewModels;
 using UnlockServer.Views;
@@ -255,6 +256,143 @@ class Program
                     "authentication failure reported success");
             });
         });
+        Test("network signature is single-use and bound to the canonical string", () =>
+        {
+            var key = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                   17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32 };
+            var keys = new FakeKeys();
+            keys.Add("c1", key);
+            var auth = new ApiAuth(keys);
+
+            var challenge = auth.IssueChallenge("c1");
+            Assert(challenge.Nonce != null, "challenge refused");
+            var sig = ApiAuth.ComputeSignature(key, "c1", "GET", "/v1/state", challenge.Nonce, "");
+            Assert(auth.Verify("c1", "GET", "/v1/state", challenge.Nonce, sig, "").Ok, "valid signature rejected");
+            Assert(auth.Verify("c1", "GET", "/v1/state", challenge.Nonce, sig, "").Code == AuthCode.ReplayedNonce,
+                "nonce was reusable");
+
+            var second = auth.IssueChallenge("c1");
+            Assert(auth.Verify("c1", "GET", "/v1/state", second.Nonce, "bogus", "").Code == AuthCode.BadSignature,
+                "wrong signature accepted");
+            Assert(auth.Verify("ghost", "GET", "/v1/state", second.Nonce, sig, "").Code == AuthCode.UnknownClient,
+                "unknown client accepted");
+
+            for (var i = 0; i < 5; i++)
+            {
+                var c = auth.IssueChallenge("c1");
+                auth.Verify("c1", "GET", "/v1/state", c.Nonce, "bogus", "");
+            }
+            Assert(auth.IssueChallenge("c1").Error == "rate_limited", "failures did not trigger lockout");
+        });
+        Test("network queue dedupes request ids and refuses overflow", () =>
+        {
+            var queue = new NetworkCommandQueue(2);
+            Assert(queue.TryEnqueue("a", NetworkCommandKind.Lock, "c1", out _), "first enqueue refused");
+            Assert(!queue.TryEnqueue("a", NetworkCommandKind.Lock, "c1", out var duplicate) && duplicate == "duplicate",
+                "duplicate request accepted");
+            Assert(queue.TryEnqueue("b", NetworkCommandKind.Unlock, "c1", out _), "second enqueue refused");
+            Assert(!queue.TryEnqueue("c", NetworkCommandKind.Lock, "c1", out var busy) && busy == "busy",
+                "overflow accepted");
+
+            NetworkRequest request;
+            Assert(queue.TryDequeue(out request) && request.Id == "a", "FIFO order lost");
+            Assert(queue.Complete("a", NetworkRequestState.Done, null), "completion refused");
+            Assert(queue.Find("a").State == NetworkRequestState.Done, "completion not persisted");
+            Assert(!queue.Complete("a", NetworkRequestState.Rejected, "x"), "double completion accepted");
+        });
+        Test("network lock runs without any bound Bluetooth device", () =>
+        {
+            var queue = new NetworkCommandQueue();
+            var manager = new UnlockManager
+            {
+                isautolock = false, isautounlock = false, manuallock = false,
+                sessionSwitchClass = new SessionSwitchClass()
+            };
+            manager.SetNetworkQueue(queue);
+            Set(manager, "_bluetooth", BluetoothService.Shared);
+            manager.SetBoundDevices(Array.Empty<BoundDevice>());
+
+            Assert(queue.TryEnqueue("lock1", NetworkCommandKind.Lock, "c1", out _), "enqueue refused");
+            Tick(manager);
+            Assert(WanClient.Locks == 1, "lock did not reach the OS");
+            Assert(queue.Find("lock1").State == NetworkRequestState.Done, "lock request not completed");
+        });
+        Test("network unlock ignores Bluetooth presence and targets the console session", () =>
+        {
+            var queue = new NetworkCommandQueue();
+            var manager = new UnlockManager
+            {
+                isautolock = false, isautounlock = false, manuallock = false,
+                sessionSwitchClass = new SessionSwitchClass()
+            };
+            manager.SetNetworkQueue(queue);
+            Set(manager, "_bluetooth", BluetoothService.Shared);
+            manager.SetBoundDevices(new[] { new BoundDevice { Address = Address } });
+            // 设备已绑定但没有任何广播，等价于"不在附近的另一路数据源"。
+            manager.sessionSwitchClass.IsLocked = true;
+            LocalUnlock.Available = true;
+            LocalUnlock.UnlockResult = true;
+
+            Assert(queue.TryEnqueue("unlock1", NetworkCommandKind.Unlock, "c1", out _), "enqueue refused");
+            Tick(manager);
+            Assert(LocalUnlock.Requests == 1, "unlock did not use the local provider");
+            Assert(LocalUnlock.RequestedSession == WanClient.WTSGetActiveConsoleSessionId(),
+                "unlock targeted a non-console session");
+            Assert(queue.Find("unlock1").State == NetworkRequestState.Done, "unlock request not completed");
+        });
+        Test("network unlock refuses when the provider is not installed", () =>
+        {
+            var queue = new NetworkCommandQueue();
+            var manager = new UnlockManager
+            {
+                isautolock = false, isautounlock = false, manuallock = false,
+                sessionSwitchClass = new SessionSwitchClass()
+            };
+            manager.SetNetworkQueue(queue);
+            Set(manager, "_bluetooth", BluetoothService.Shared);
+            manager.sessionSwitchClass.IsLocked = true;
+            LocalUnlock.Available = false;
+
+            Assert(queue.TryEnqueue("unlock2", NetworkCommandKind.Unlock, "c1", out _), "enqueue refused");
+            Tick(manager);
+            var request = queue.Find("unlock2");
+            Assert(request.State == NetworkRequestState.Rejected && request.Reason == "provider_not_ready",
+                "missing provider was not reported");
+            Assert(LocalUnlock.Requests == 0, "requested unlock without a provider");
+        });
+        Test("network lock on an already locked session reports no state change", () =>
+        {
+            var queue = new NetworkCommandQueue();
+            var manager = new UnlockManager
+            {
+                isautolock = false, isautounlock = false, manuallock = false,
+                sessionSwitchClass = new SessionSwitchClass()
+            };
+            manager.SetNetworkQueue(queue);
+            Set(manager, "_bluetooth", BluetoothService.Shared);
+            manager.sessionSwitchClass.IsLocked = true;
+
+            Assert(queue.TryEnqueue("lock2", NetworkCommandKind.Lock, "c1", out _), "enqueue refused");
+            Tick(manager);
+            Assert(WanClient.Locks == 0, "locked session was locked twice");
+            var request = queue.Find("lock2");
+            Assert(request.State == NetworkRequestState.Done && request.Reason == "already_in_state",
+                "idempotent lock not reported");
+        });
         Console.WriteLine("All regression scenarios passed (OS/Bluetooth side effects simulated).");
+    }
+
+    class FakeKeys : IClientKeyProvider
+    {
+        private readonly System.Collections.Generic.Dictionary<string, byte[]> _keys =
+            new System.Collections.Generic.Dictionary<string, byte[]>(StringComparer.Ordinal);
+
+        public void Add(string id, byte[] key) { _keys[id] = key; }
+
+        public byte[] FindKey(string clientId)
+        {
+            byte[] key;
+            return _keys.TryGetValue(clientId ?? "", out key) ? key : null;
+        }
     }
 }
