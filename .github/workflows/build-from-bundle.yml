@@ -32,11 +32,18 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # 老式（非 SDK）csproj 单工程还原必须给 SolutionDir，
+      # 否则 NuGet.targets 报 "No solution found"，也定位不到 packages 目录。
+      # packages 落到 $(SolutionDir)packages，正好匹配 csproj 里的 ..\packages HintPath。
       - name: Restore NuGet (packages.config layout)
         working-directory: src
-        run: >
-          msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -t:restore
-          -p:RestorePackagesConfig=true -v:m
+        shell: pwsh
+        run: |
+          $solutionDir = (Join-Path $env:GITHUB_WORKSPACE 'src').Replace('\', '/') + '/'
+          Write-Host "SolutionDir=$solutionDir"
+          msbuild UnlockServer.Wpf\UnlockServer.Wpf.csproj -t:restore -p:RestorePackagesConfig=true -p:SolutionDir=$solutionDir -v:m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem packages -ErrorAction SilentlyContinue | Select-Object Name
 
       - name: Build WPF (net48)
         working-directory: src
